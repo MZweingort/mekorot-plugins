@@ -1,0 +1,14 @@
+{
+  "name": "mekorot-plugins",
+  "owner": { "name": "Menachem Zeev", "email": "mzweingort@gmail.com" },
+  "metadata": { "description": "תוספים לעריכת סיכומי שיעורי הרב יצחק גינזבורג" },
+  "plugins": [
+    {
+      "name": "mekorot-shiur",
+      "source": "./plugins/mekorot-shiur",
+      "description": "מילוי מראי מקומות בהערות שוליים ריקות בסיכומי שיעורים, במעקב שינויים",
+      "category": "productivity",
+      "keywords": ["מראי מקומות", "הערות שוליים", "docx"]
+    }
+  ]
+}
