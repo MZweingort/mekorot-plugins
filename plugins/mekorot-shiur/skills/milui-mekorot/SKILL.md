@@ -44,11 +44,20 @@ for t in "מחכמה נפקת" "וראית את אחורי" "מתוך גרונו
 
 ## שלב 5 – החלה, אימות, מסירה
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/skills/milui-mekorot/scripts/footnotes_tool.py" apply shiur.docx fills.json "shiur - עם מקורות.docx" --author Claude
-soffice --headless --convert-to pdf --outdir . "shiur - עם מקורות.docx"   # חייב להצליח; לבדוק עמוד עם הערות שמולאו
+T="${CLAUDE_PLUGIN_ROOT}/skills/milui-mekorot/scripts/footnotes_tool.py"
+python "$T" apply shiur.docx fills.json "shiur - עם מקורות.docx" --author Claude
+python "$T" verify "shiur - עם מקורות.docx" --original shiur.docx --fills fills.json
 ```
-אם קיים סקריפט האימות של skill ה-docx (`validate.py --original shiur.docx --author Claude`) – להריץ גם אותו.
+`verify` הוא הבדיקה המחייבת והיא עובדת בכל מקום (python בלבד): שלמות ה-zip וה-XML, שכל השינויים במעקב שינויים, שמספר ההערות לא השתנה, ושכל המילויים וה-comments נכנסו. כל שורת FAIL – לתקן ולהריץ שוב, לא למסור.
+
+בדיקות נוספות **אם הכלים קיימים במחשב** (`command -v soffice`, וסקריפט ה-docx skill) – רצוי אך לא חובה, ואם הן חסרות פשוט מדלגים בלי להתקין כלום:
+```bash
+command -v soffice >/dev/null && soffice --headless --convert-to pdf --outdir . "shiur - עם מקורות.docx"
+```
 למסור את הקובץ, ובסיכום למשתמש: (1) מה מולא ובאיזה מקור, (2) מה סומן כלא-ודאי ולמה, (3) מה נשאר ריק. בלי להעתיק את כל ההערות – רשימה תמציתית.
+
+## סביבה
+עובד גם ב-Cowork וגם ב-Claude Code. הסקריפט משתמש ב-python3 בלבד (ספריות תקן, בלי התקנות). ב-Claude Code הקבצים הם קבצים מקומיים של המשתמש: לעבוד עליהם במקום, לכתוב את הפלט לצד קובץ המקור, ולא להעביר לשום מקום. `pandoc` נדרש רק אם ממירים קובץ ערכים חדש; `soffice` רק לבדיקה האופציונלית.
 
 ## מספור
 מספר ההערה ב-`list` = `w:id` ב-footnotes.xml = מספר ה-`[^N]` בפלט `pandoc -t markdown` של המסמך. ids −1 ו-0 הם מפרידים, לא הערות.
