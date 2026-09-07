@@ -7,6 +7,10 @@ footnotes_tool.py – כלי למילוי הערות שוליים ב-docx במע
       מדפיס את ההערות הריקות / המכילות ??? (או את כולן עם --all), ולכל אחת את
       קטע הטקסט בגוף המסמך שאליו היא מפנה (כדי לדעת מה צריך מקור).
 
+  python footnotes_tool.py verify out.docx [--original in.docx] [--fills fills.json]
+      בודק את קובץ הפלט בלי כלים חיצוניים: שלמות ה-zip וה-XML, שהשינויים אכן
+      במעקב שינויים, שמספר ההערות לא השתנה, ושכל המילויים וה-comments נכנסו.
+
   python footnotes_tool.py apply in.docx fills.json out.docx [--author Claude]
       מחיל את המילויים מ-fills.json במעקב שינויים (w:ins / w:del) ומוסיף
       comments להערות מסומנות כלא-ודאיות.
@@ -229,13 +233,82 @@ def cmd_apply(args):
     print('written', args.out)
 
 
+
+def cmd_verify(args):
+    """בדיקה טהורה ב-python (בלי LibreOffice): שלמות הקובץ, מעקב השינויים, וההערות שמולאו."""
+    import xml.etree.ElementTree as ET
+    ok = True
+    with zipfile.ZipFile(args.docx) as z:
+        bad = z.testzip()
+        if bad:
+            print('FAIL  קובץ ה-zip פגום:', bad); return
+        names = z.namelist()
+        for n in names:
+            if n.endswith('.xml') or n.endswith('.rels'):
+                try:
+                    ET.fromstring(z.read(n))
+                except Exception as e:
+                    print('FAIL  XML לא תקין ב-%s: %s' % (n, e)); ok = False
+        fn = z.read('word/footnotes.xml').decode('utf8')
+        doc = z.read('word/document.xml').decode('utf8')
+        comments = z.read('word/comments.xml').decode('utf8') if 'word/comments.xml' in names else ''
+    print('OK    מבנה הקובץ ו-XML תקינים' if ok else 'שגיאות מבנה למעלה')
+
+    ins = re.findall(r'<w:ins\b[^>]*w:author="([^"]*)"', fn + doc)
+    dele = re.findall(r'<w:del\b[^>]*w:author="([^"]*)"', fn + doc)
+    print('OK    הוספות במעקב שינויים: %d, מחיקות: %d (מחברים: %s)'
+          % (len(ins), len(dele), ', '.join(sorted(set(ins + dele))) or '-'))
+    if not ins:
+        print('FAIL  אין אף הוספה במעקב שינויים'); ok = False
+
+    untracked = re.findall(r'</w:ins>\s*(?:<w:proofErr[^>]*/>\s*)*<w:r\b(?:(?!</w:r>).)*?<w:t[^>]*>[^<]', fn, re.S)
+    total_fn = len(re.findall(r'<w:footnote\b[^>]*w:id="(?!-?[01]")', fn))
+    print('OK    הערות שוליים בקובץ: %d' % total_fn)
+
+    if args.original:
+        with zipfile.ZipFile(args.original) as z:
+            ofn = z.read('word/footnotes.xml').decode('utf8')
+        o = len(re.findall(r'<w:footnote\b[^>]*w:id="(?!-?[01]")', ofn))
+        if o != total_fn:
+            print('FAIL  מספר ההערות השתנה: %d ← %d' % (o, total_fn)); ok = False
+        else:
+            print('OK    מספר ההערות לא השתנה (%d)' % o)
+
+    if args.fills:
+        spec = json.load(open(args.fills, encoding='utf8'))
+        plain = html.unescape(''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', fn)))
+        missing = []
+        for k, v in (spec.get('fill') or {}).items():
+            probe = v[:40]
+            if probe not in plain:
+                missing.append('fill %s' % k)
+        for it in (spec.get('replace') or []) + (spec.get('replace_runs') or []):
+            if it['new'][:40] not in plain:
+                missing.append('replace %s' % it['id'])
+        if missing:
+            print('FAIL  טקסט שלא נמצא בקובץ הפלט: %s' % ', '.join(missing)); ok = False
+        else:
+            print('OK    כל המילויים מופיעים בקובץ')
+        want = [int(c['id']) for c in (spec.get('comments') or [])]
+        got = len(re.findall(r'<w:comment\b[^>]*w:id="\d+"', comments))
+        anchors = len(re.findall(r'<w:commentReference w:id="\d+"/>', doc))
+        if want:
+            if got >= len(want) and anchors >= len(want):
+                print('OK    הערות (comments): %d, מעוגנות בגוף המסמך: %d' % (got, anchors))
+            else:
+                print('FAIL  ציפינו ל-%d comments; נמצאו %d, מעוגנות %d' % (len(want), got, anchors)); ok = False
+
+    print('\n' + ('הקובץ תקין ומוכן למסירה.' if ok else 'נמצאו בעיות – לא למסור לפני תיקון.'))
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest='cmd', required=True)
     a = sub.add_parser('list'); a.add_argument('docx'); a.add_argument('--all', action='store_true')
     b = sub.add_parser('apply'); b.add_argument('docx'); b.add_argument('fills'); b.add_argument('out'); b.add_argument('--author', default='Claude')
+    c = sub.add_parser('verify'); c.add_argument('docx'); c.add_argument('--original'); c.add_argument('--fills')
     args = ap.parse_args()
-    {'list': cmd_list, 'apply': cmd_apply}[args.cmd](args)
+    {'list': cmd_list, 'apply': cmd_apply, 'verify': cmd_verify}[args.cmd](args)
 
 
 if __name__ == '__main__':
