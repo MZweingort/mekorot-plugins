@@ -2,7 +2,7 @@
   "mcpServers": {
     "galeinai-archive": {
       "type": "http",
-      "url": "https://galeinai-v3.vercel.app/mcp/"
+      "url": "https://galeinai-mcp.vercel.app/api/mcp"
     }
   }
 }
