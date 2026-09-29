@@ -4,7 +4,7 @@ footnotes_tool.py – כלי למילוי הערות שוליים ב-docx במע
 
 שימוש:
   python footnotes_tool.py list  in.docx [--all]
-      מדפיס את ההערות הריקות / המכילות ??? (או את כולן עם --all), ולכל אחת את
+      מדפיס את ההערות הריקות / המכילות ?? או ??? (או את כולן עם --all), ולכל אחת את
       קטע הטקסט בגוף המסמך שאליו היא מפנה (כדי לדעת מה צריך מקור).
 
   python footnotes_tool.py verify out.docx [--original in.docx] [--fills fills.json]
@@ -212,10 +212,12 @@ def cmd_list(args):
         if i < 1:
             continue
         t = ''.join(html.unescape(x) for x in re.findall(r'<w:t[^>]*>([^<]*)</w:t>', body)).strip()
-        if args.all or not t or '???' in t:
-            tag = 'EMPTY' if not t else ('???' if '???' in t else 'ok')
+        # editors mark a missing source with ?? or ??? (also inside a longer note: "הערה??", "פרק??")
+        need = not t or '??' in t
+        if args.all or need:
+            tag = 'EMPTY' if not t else ('??' if '??' in t else 'ok')
             print('--- [%d] %s' % (i, tag))
-        if not args.all and (not t or '???' in t):
+        if not args.all and need:
             print('   הערה: %s' % (t[:300] or '(ריקה)'))
             print('   בגוף: %s' % d.context(i))
         elif args.all:
