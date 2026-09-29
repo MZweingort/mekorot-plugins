@@ -24,6 +24,7 @@ footnotes_tool.py – כלי למילוי הערות שוליים ב-docx במע
 }
 - fill: הערה ריקה ← מוסיף את הטקסט בסוף ההערה.
 - replace: מחליף מחרוזת שנמצאת בתוך run אחד (מחיקה + הוספה במעקב).
+  אם המחרוזת מופיעה בכמה runs (למשל שני `???` באותה הערה) – "nth": 1/2/... בוחר את המופע (בסדר ההערה).
 - replace_runs: מוחק את כל ה-runs מהראשון שמכיל first עד האחרון שמכיל last, ומוסיף new.
 - comments: מוסיף comment שמעוגן על סימן ההערה בגוף המסמך (לא בתוך ההערה – LibreOffice נשבר מזה).
 """
@@ -124,11 +125,15 @@ class Editor:
         k = body.rfind('</w:p>')
         self.d.set_fn(i, body[:k] + self.ins_run(text) + body[k:])
 
-    def replace_in_run(self, i, old, new):
+    def replace_in_run(self, i, old, new, nth=None):
         body = self.d.fn_match(i).group(2)
         ms = [m for m in RUN.finditer(body) if old in run_text(m.group(0))]
+        if nth:
+            if not 1 <= nth <= len(ms):
+                raise SystemExit('footnote %d: "%s" found in %d runs, no match #%d' % (i, old, len(ms), nth))
+            ms = [ms[nth - 1]]
         if len(ms) != 1:
-            raise SystemExit('footnote %d: "%s" found in %d runs (need exactly 1; use replace_runs)' % (i, old, len(ms)))
+            raise SystemExit('footnote %d: "%s" found in %d runs (need exactly 1; pass "nth" or use replace_runs)' % (i, old, len(ms)))
         m = ms[0]
         r = m.group(0)
         rpr = re.search(r'<w:rPr>.*?</w:rPr>', r, re.S)
@@ -225,7 +230,7 @@ def cmd_apply(args):
     for k, v in (spec.get('fill') or {}).items():
         e.fill_empty(int(k), v)
     for it in spec.get('replace') or []:
-        e.replace_in_run(int(it['id']), it['old'], it['new'])
+        e.replace_in_run(int(it['id']), it['old'], it['new'], it.get('nth'))
     for it in spec.get('replace_runs') or []:
         e.replace_runs(int(it['id']), it['first'], it['last'], it['new'])
     e.add_comments(spec.get('comments') or [])
