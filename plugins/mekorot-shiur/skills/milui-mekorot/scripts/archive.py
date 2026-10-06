@@ -18,7 +18,7 @@ import sys
 import urllib.error
 import urllib.request
 
-URL = "https://galeinai-mcp.vercel.app/api/mcp"
+URL = "https://galeinai.org.il/mcp/"
 
 
 def rpc(method, params=None):
