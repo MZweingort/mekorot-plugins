@@ -7,9 +7,15 @@ footnotes_tool.py – כלי למילוי הערות שוליים ב-docx במע
       מדפיס את ההערות הריקות / המכילות ?? או ??? (או את כולן עם --all), ולכל אחת את
       קטע הטקסט בגוף המסמך שאליו היא מפנה (כדי לדעת מה צריך מקור).
 
+  python footnotes_tool.py dump  in.docx [--out dump.txt]
+      כל המסמך כטקסט: פסקאות הגוף עם סימני [^N] במקום ההערות, ואחריהן כל ההערות.
+      תחליף ל-pandoc (שאינו מותקן בכל מחשב) – לקריאת ההקשר המלא ולחיפוש (grep).
+
   python footnotes_tool.py verify out.docx [--original in.docx] [--fills fills.json]
       בודק את קובץ הפלט בלי כלים חיצוניים: שלמות ה-zip וה-XML, שהשינויים אכן
       במעקב שינויים, שמספר ההערות לא השתנה, ושכל המילויים וה-comments נכנסו.
+      עם --original בודק גם שגוף המסמך זהה למקור, ושדחיית כל השינויים (Reject All)
+      מחזירה כל הערה בדיוק לנוסח המקורי – כלומר שלא נגענו בשום דבר מחוץ למעקב.
 
   python footnotes_tool.py apply in.docx fills.json out.docx [--author Claude]
       מחיל את המילויים מ-fills.json במעקב שינויים (w:ins / w:del) ומוסיף
@@ -102,7 +108,7 @@ class Editor:
     def __init__(self, doc, author):
         self.d = doc
         self.author = author
-        self.date = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.date = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         ids = [int(x) for x in re.findall(r'<w:(?:ins|del)\b[^>]*w:id="(\d+)"', doc.fn + doc.doc)]
         self._id = max(ids + [9000])
 
@@ -206,14 +212,32 @@ class Editor:
         open(cpath, 'w', encoding='utf8').write(cx)
 
 
+DEL = re.compile(r'<w:del\b.*?</w:del>', re.S)
+INS = re.compile(r'<w:ins\b.*?</w:ins>', re.S)
+
+
+def live_text(xml):
+    """הטקסט כפי שהוא נראה אחרי קבלת כל השינויים (בלי מה שנמחק במעקב)."""
+    return para_text(DEL.sub('', xml))
+
+
+def original_text(xml):
+    """הטקסט כפי שהוא נראה אחרי דחיית כל השינויים: בלי ההוספות, עם המחיקות."""
+    return para_text(INS.sub('', xml).replace('w:delText', 'w:t'))
+
+
 def cmd_list(args):
     d = Doc(args.docx)
+    total = empty = marked = 0
     for i, body in d.footnotes():
         if i < 1:
             continue
-        t = ''.join(html.unescape(x) for x in re.findall(r'<w:t[^>]*>([^<]*)</w:t>', body)).strip()
+        t = live_text(body).strip()
         # editors mark a missing source with ?? or ??? (also inside a longer note: "הערה??", "פרק??")
         need = not t or '??' in t
+        total += 1
+        empty += not t
+        marked += bool(t) and '??' in t
         if args.all or need:
             tag = 'EMPTY' if not t else ('??' if '??' in t else 'ok')
             print('--- [%d] %s' % (i, tag))
@@ -222,7 +246,30 @@ def cmd_list(args):
             print('   בגוף: %s' % d.context(i))
         elif args.all:
             print('   הערה: %s' % t[:200])
+    print('=== למילוי: %d מתוך %d הערות (%d ריקות, %d עם ??)' % (empty + marked, total, empty, marked))
     shutil.rmtree(d.tmp)
+
+
+def cmd_dump(args):
+    d = Doc(args.docx)
+    lines = []
+    for m in re.finditer(r'<w:p\b[^>]*>.*?</w:p>', d.doc, re.S):
+        p = re.sub(r'<w:footnoteReference w:id="(\d+)"/>', lambda r: '<w:t>[^%s]</w:t>' % r.group(1), m.group(0))
+        t = live_text(p)
+        if t.strip():
+            lines.append(t)
+    lines.append('')
+    lines.append('===== הערות שוליים =====')
+    for i, body in d.footnotes():
+        if i >= 1:
+            lines.append('[^%d]: %s' % (i, live_text(body).strip()))
+    shutil.rmtree(d.tmp)
+    out = '\n'.join(lines) + '\n'
+    if args.out:
+        open(args.out, 'w', encoding='utf8').write(out)
+        print('written %s (%d שורות, %d תווים)' % (args.out, len(lines), len(out)))
+    else:
+        sys.stdout.write(out)
 
 
 def cmd_apply(args):
@@ -269,17 +316,30 @@ def cmd_verify(args):
         print('FAIL  אין אף הוספה במעקב שינויים'); ok = False
 
     untracked = re.findall(r'</w:ins>\s*(?:<w:proofErr[^>]*/>\s*)*<w:r\b(?:(?!</w:r>).)*?<w:t[^>]*>[^<]', fn, re.S)
-    total_fn = len(re.findall(r'<w:footnote\b[^>]*w:id="(?!-?[01]")', fn))
+    total_fn = len(re.findall(r'<w:footnote\b[^>]*w:id="(?!(?:-1|0)")', fn))
     print('OK    הערות שוליים בקובץ: %d' % total_fn)
 
     if args.original:
         with zipfile.ZipFile(args.original) as z:
             ofn = z.read('word/footnotes.xml').decode('utf8')
-        o = len(re.findall(r'<w:footnote\b[^>]*w:id="(?!-?[01]")', ofn))
+            odoc = z.read('word/document.xml').decode('utf8')
+        o = len(re.findall(r'<w:footnote\b[^>]*w:id="(?!(?:-1|0)")', ofn))
         if o != total_fn:
             print('FAIL  מספר ההערות השתנה: %d ← %d' % (o, total_fn)); ok = False
         else:
             print('OK    מספר ההערות לא השתנה (%d)' % o)
+        if original_text(doc) != original_text(odoc):
+            print('FAIL  טקסט גוף המסמך שונה מהמקור'); ok = False
+        else:
+            print('OK    גוף המסמך זהה למקור')
+        FN = r'<w:footnote\b[^>]*w:id="(-?\d+)"[^>]*>(.*?)</w:footnote>'
+        before = {m.group(1): original_text(m.group(2)) for m in re.finditer(FN, ofn, re.S)}
+        after = {m.group(1): original_text(m.group(2)) for m in re.finditer(FN, fn, re.S)}
+        moved = sorted((k for k in before if before[k] != after.get(k)), key=int)
+        if moved:
+            print('FAIL  הערות שהנוסח המקורי שלהן השתנה מחוץ למעקב השינויים: %s' % ', '.join(moved)); ok = False
+        else:
+            print('OK    דחיית כל השינויים מחזירה כל הערה לנוסח המקורי')
 
     if args.fills:
         spec = json.load(open(args.fills, encoding='utf8'))
@@ -305,6 +365,10 @@ def cmd_verify(args):
             else:
                 print('FAIL  ציפינו ל-%d comments; נמצאו %d, מעוגנות %d' % (len(want), got, anchors)); ok = False
 
+    still = [m.group(1) for m in re.finditer(r'<w:footnote\b[^>]*w:id="(\d+)"[^>]*>(.*?)</w:footnote>', fn, re.S)
+             if int(m.group(1)) >= 1 and (not live_text(m.group(2)).strip() or '??' in live_text(m.group(2)))]
+    print('INFO  נשארו פתוחות (ריקות / ??): %d%s' % (len(still), (' – ' + ', '.join(still)) if still else ''))
+
     print('\n' + ('הקובץ תקין ומוכן למסירה.' if ok else 'נמצאו בעיות – לא למסור לפני תיקון.'))
 
 
@@ -314,8 +378,9 @@ def main():
     a = sub.add_parser('list'); a.add_argument('docx'); a.add_argument('--all', action='store_true')
     b = sub.add_parser('apply'); b.add_argument('docx'); b.add_argument('fills'); b.add_argument('out'); b.add_argument('--author', default='Claude')
     c = sub.add_parser('verify'); c.add_argument('docx'); c.add_argument('--original'); c.add_argument('--fills')
+    e = sub.add_parser('dump'); e.add_argument('docx'); e.add_argument('--out')
     args = ap.parse_args()
-    {'list': cmd_list, 'apply': cmd_apply, 'verify': cmd_verify}[args.cmd](args)
+    {'list': cmd_list, 'apply': cmd_apply, 'verify': cmd_verify, 'dump': cmd_dump}[args.cmd](args)
 
 
 if __name__ == '__main__':
