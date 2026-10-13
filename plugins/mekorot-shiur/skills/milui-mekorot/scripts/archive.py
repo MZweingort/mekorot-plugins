@@ -18,7 +18,7 @@ import sys
 import urllib.error
 import urllib.request
 
-URL = "https://galeinai.org.il/mcp/"
+URL = "https://galeinai-mcp.vercel.app/api/mcp"
 
 
 def rpc(method, params=None):
@@ -37,6 +37,8 @@ def rpc(method, params=None):
     except urllib.error.URLError as e:
         sys.exit(f"archive: cannot reach {URL} ({e.reason}) – "
                  "network may be blocked in this session; skip the archive step")
+    except ValueError:
+        sys.exit(f"archive: {URL} did not answer JSON – it is not the MCP endpoint")
     if "error" in data:
         sys.exit(f"archive: {data['error'].get('message', data['error'])}")
     return data["result"]
