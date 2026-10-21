@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Call the Gal Einai archive MCP server directly over HTTP.
 
-Fallback for sessions where the galeinai-archive connector did not connect:
-the server is stateless JSON-RPC, so a plain POST of `tools/call` works
-without any MCP client. Standard library only.
+Fallback for sessions where no archive connector is connected: the server
+is stateless JSON-RPC, so a plain POST of `tools/call` works without any MCP
+client. Standard library only.
 
   archive.py search "דבר הוי' מירושלם" [--scope footnotes|titles|headings]
                     [--tree lessons|books|audio] [--year 5777] [--limit 10] [--full]
@@ -11,37 +11,87 @@ without any MCP client. Standard library only.
   archive.py ask "שאלה" --keywords "מלה מלה"
   archive.py years [filter]
   archive.py ping
+
+The endpoint is https://galeinai-mcp.vercel.app/api/mcp. https://galeinai.org.il/mcp/
+is the site's "connect to AI" page for people (HTML), and it prints the
+endpoint's address – so when an address answers HTML, the address is read off
+that page and tried instead. If the endpoint ever moves, the page carries the
+new address and this script follows it. GALEINAI_MCP_URL overrides both.
 """
 import argparse
 import json
+import os
+import re
 import sys
 import urllib.error
 import urllib.request
 
-URL = "https://galeinai-mcp.vercel.app/api/mcp"
+ENDPOINT = "https://galeinai-mcp.vercel.app/api/mcp"
+PAGE = "https://galeinai.org.il/mcp/"
+UA = "mekorot-shiur-plugin"
+
+
+def _post(url, body):
+    req = urllib.request.Request(url, data=body, headers={
+        "content-type": "application/json",
+        "accept": "application/json, text/event-stream",
+        "user-agent": UA,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            return r.headers.get("content-type", ""), r.read().decode("utf8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.headers.get("content-type", ""), e.read().decode("utf8", "replace")
+
+
+def _decode(ctype, text):
+    """The JSON-RPC message, or None when the answer is not one (an HTML page)."""
+    if "event-stream" in ctype:
+        text = "\n".join(l[5:].strip() for l in text.splitlines() if l.startswith("data:"))
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) and ("result" in data or "error" in data) else None
+
+
+def _addresses_on(url):
+    """MCP addresses printed on a page – the site's /mcp/ page hands out the endpoint."""
+    try:
+        req = urllib.request.Request(url, headers={"user-agent": UA, "accept": "text/html"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            page = r.read().decode("utf8", "replace")
+    except (urllib.error.URLError, ValueError):
+        return []
+    return list(dict.fromkeys(re.findall(r'https://[^\s"\'<>]+/mcp/?(?=[\s"\'<>]|$)', page)))
 
 
 def rpc(method, params=None):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
                        "params": params or {}}).encode()
-    req = urllib.request.Request(URL, data=body, headers={
-        "content-type": "application/json",
-        "accept": "application/json, text/event-stream",
-        "user-agent": "mekorot-shiur-plugin",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=90) as r:
-            data = json.load(r)
-    except urllib.error.HTTPError as e:
-        sys.exit(f"archive: HTTP {e.code} from {URL}")
-    except urllib.error.URLError as e:
-        sys.exit(f"archive: cannot reach {URL} ({e.reason}) – "
-                 "network may be blocked in this session; skip the archive step")
-    except ValueError:
-        sys.exit(f"archive: {URL} did not answer JSON – it is not the MCP endpoint")
-    if "error" in data:
-        sys.exit(f"archive: {data['error'].get('message', data['error'])}")
-    return data["result"]
+    todo = [u for u in (os.environ.get("GALEINAI_MCP_URL"), ENDPOINT, PAGE) if u]
+    tried, why = [], []
+    while todo:
+        url = todo.pop(0)
+        if url in tried:
+            continue
+        tried.append(url)
+        try:
+            ctype, text = _post(url, body)
+        except urllib.error.URLError as e:
+            why.append(f"{url}: cannot reach ({e.reason})")
+            continue
+        data = _decode(ctype, text)
+        if data is None:
+            # not the endpoint (most likely the page for people) – take the address it gives
+            why.append(f"{url}: answered {ctype or 'something'} instead of JSON-RPC")
+            todo += [u for u in _addresses_on(url) if u not in tried]
+            continue
+        if "error" in data:
+            sys.exit(f"archive: {data['error'].get('message', data['error'])}")
+        return data["result"]
+    sys.exit("archive: no address answered as the MCP server – " + "; ".join(why) +
+             ". If none could be reached, the network is blocked in this session: skip the archive step.")
 
 
 def call(tool, args):
