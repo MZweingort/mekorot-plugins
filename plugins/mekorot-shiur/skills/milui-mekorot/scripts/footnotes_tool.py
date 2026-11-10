@@ -12,32 +12,87 @@ footnotes_tool.py – כלי למילוי הערות שוליים ב-docx במע
       תחליף ל-pandoc (שאינו מותקן בכל מחשב) – לקריאת ההקשר המלא ולחיפוש (grep).
 
   python footnotes_tool.py verify out.docx [--original in.docx] [--fills fills.json]
-      בודק את קובץ הפלט בלי כלים חיצוניים: שלמות ה-zip וה-XML, שהשינויים אכן
-      במעקב שינויים, שמספר ההערות לא השתנה, ושכל המילויים וה-comments נכנסו.
-      עם --original בודק גם שגוף המסמך זהה למקור, ושדחיית כל השינויים (Reject All)
-      מחזירה כל הערה בדיוק לנוסח המקורי – כלומר שלא נגענו בשום דבר מחוץ למעקב.
+      בודק את קובץ הפלט בלי כלים חיצוניים: שלמות ה-zip וה-XML, מעקב השינויים,
+      שמספר ההערות לא השתנה, ושכל המילויים, הצבע הכחול וה-comments נכנסו.
+      עם --original (ו---fills) בודק גם שגוף המסמך זהה למקור, ושדחיית כל השינויים
+      (Reject All) מחזירה כל הערה לנוסח המקורי – חוץ מהמילויים שהוכנסו בכוונה בלי
+      מעקב (fill_untracked / "tracked": false), שאותם הוא מצפה למצוא כלשונם.
 
   python footnotes_tool.py apply in.docx fills.json out.docx [--author Claude]
-      מחיל את המילויים מ-fills.json במעקב שינויים (w:ins / w:del) ומוסיף
-      comments להערות מסומנות כלא-ודאיות.
+      מחיל את המילויים מ-fills.json – במעקב שינויים (w:ins / w:del) או בלעדיו –
+      ומוסיף comments להערות מסומנות כלא-ודאיות.
 
 מבנה fills.json (UTF-8):
 {
-  "fill":    {"92": "זהר ח\"ב קכא, א.", "98": "שמות לג, כג."},
-  "replace": [{"id": 106, "old": "(???)", "new": "(בראשית ב, ד)"}],
+  "fill_untracked": {"98": "שמות לג, כג."},
+  "fill":    {"92": "ראה {{סוד ה' ליראיו}} ש\"ח. ובכ\"מ."},
+  "replace": [{"id": 106, "old": "(???)", "new": "(בראשית ב, ד)", "tracked": false}],
   "replace_runs": [{"id": 101, "first": "ראה ???", "last": "???", "new": "כמו ..."}],
   "comments": [{"id": 93, "text": "מקור לא ודאי – ..."}]
 }
-- fill: הערה ריקה ← מוסיף את הטקסט בסוף ההערה.
-- replace: מחליף מחרוזת שנמצאת בתוך run אחד (מחיקה + הוספה במעקב).
+- fill_untracked: הערה ריקה ← מוסיף את הטקסט בסוף ההערה, בלי מעקב שינויים
+  (מקור ודאי ופשוט: פסוק, מאמר חז"ל מובהק שאומת, ערך מקובץ הערכים כלשונו).
+- fill: הערה ריקה ← מוסיף את הטקסט בסוף ההערה, במעקב שינויים (כל מה שעין אנושית צריכה לאשר).
+- replace: מחליף מחרוזת שנמצאת בתוך run אחד (מחיקה + הוספה במעקב; עם "tracked": false – בלי מעקב).
   אם המחרוזת מופיעה בכמה runs (למשל שני `???` באותה הערה) – "nth": 1/2/... בוחר את המופע (בסדר ההערה).
-- replace_runs: מוחק את כל ה-runs מהראשון שמכיל first עד האחרון שמכיל last, ומוסיף new.
+- replace_runs: מוחק את כל ה-runs מהראשון שמכיל first עד האחרון שמכיל last, ומוסיף new
+  (גם כאן "tracked": false אפשרי).
+- {{...}} בתוך טקסט של מילוי = שם ספר של הרב: נכתב בכחול (00B0F0), בלי הסוגריים.
 - comments: מוסיף comment שמעוגן על סימן ההערה בגוף המסמך (לא בתוך ההערה – LibreOffice נשבר מזה).
 """
 import sys, re, os, json, html, zipfile, shutil, datetime, tempfile, argparse
 from xml.sax.saxutils import escape
 
 RUN = re.compile(r'<w:r\b[^>]*>.*?</w:r>', re.S)
+
+# Names of the Rav's books are written in this blue (the editor's own colour).
+BLUE = '00B0F0'
+MARKUP = re.compile(r'\{\{(.+?)\}\}')
+# CT_RPr children that come after <w:color> – a colour must be inserted before them.
+AFTER_COLOR = ('spacing', 'w', 'kern', 'position', 'sz', 'szCs', 'highlight', 'u', 'effect', 'bdr',
+               'shd', 'fitText', 'vertAlign', 'rtl', 'cs', 'em', 'lang', 'eastAsianLayout',
+               'specVanish', 'oMath')
+BOOKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'references', 'sifrei-harav.md')
+
+
+def segments(text):
+    """'ראה {{סוד ה' ליראיו}} ש"ח.' → [('ראה ', False), ("סוד ה' ליראיו", True), (' ש"ח.', False)]"""
+    out, pos = [], 0
+    for m in MARKUP.finditer(text):
+        if m.start() > pos:
+            out.append((text[pos:m.start()], False))
+        out.append((m.group(1), True))
+        pos = m.end()
+    if pos < len(text):
+        out.append((text[pos:], False))
+    return out
+
+
+def unmark(text):
+    return MARKUP.sub(r'\1', text)
+
+
+def with_color(rpr, color=BLUE):
+    if not rpr:
+        return '<w:rPr><w:color w:val="%s"/></w:rPr>' % color
+    if '<w:color ' in rpr:
+        return re.sub(r'<w:color [^>]*/>', '<w:color w:val="%s"/>' % color, rpr)
+    m = re.search(r'<w:(?:%s)[\s/>]' % '|'.join(AFTER_COLOR), rpr)
+    k = m.start() if m else rpr.rfind('</w:rPr>')
+    return rpr[:k] + '<w:color w:val="%s"/>' % color + rpr[k:]
+
+
+def book_titles():
+    """The Rav's books (references/sifrei-harav.md, lines '- title')."""
+    try:
+        lines = open(BOOKS_FILE, encoding='utf8').read().splitlines()
+    except OSError:
+        return []
+    return [l[2:].strip() for l in lines if l.startswith('- ') and l[2:].strip()]
+
+
+def norm_q(s):
+    return s.replace('״', '"').replace('׳', "'").replace('’', "'")
 
 
 def run_text(r):
@@ -118,20 +173,29 @@ class Editor:
 
     RPR = '<w:rPr><w:rFonts w:hint="cs"/><w:rtl/></w:rPr>'
 
+    def runs(self, text, rpr=None):
+        """Plain runs for text; {{...}} segments (the Rav's book names) in blue."""
+        rpr = rpr if rpr is not None else self.RPR
+        return ''.join('<w:r>%s<w:t xml:space="preserve">%s</w:t></w:r>' % (with_color(rpr) if blue else rpr, escape(s))
+                       for s, blue in segments(text))
+
     def ins_run(self, text, rpr=None):
-        return ('<w:ins w:id="%d" w:author="%s" w:date="%s"><w:r>%s<w:t xml:space="preserve">%s</w:t></w:r></w:ins>'
-                % (self.nid(), escape(self.author), self.date, rpr if rpr is not None else self.RPR, escape(text)))
+        return ('<w:ins w:id="%d" w:author="%s" w:date="%s">%s</w:ins>'
+                % (self.nid(), escape(self.author), self.date, self.runs(text, rpr)))
+
+    def new_runs(self, text, rpr=None, tracked=True):
+        return self.ins_run(text, rpr) if tracked else self.runs(text, rpr)
 
     def del_run(self, run_xml):
         r = re.sub(r'<w:t(?: [^>]*)?>', '<w:delText xml:space="preserve">', run_xml).replace('</w:t>', '</w:delText>')
         return '<w:del w:id="%d" w:author="%s" w:date="%s">%s</w:del>' % (self.nid(), escape(self.author), self.date, r)
 
-    def fill_empty(self, i, text):
+    def fill_empty(self, i, text, tracked=True):
         body = self.d.fn_match(i).group(2)
         k = body.rfind('</w:p>')
-        self.d.set_fn(i, body[:k] + self.ins_run(text) + body[k:])
+        self.d.set_fn(i, body[:k] + self.new_runs(text, tracked=tracked) + body[k:])
 
-    def replace_in_run(self, i, old, new, nth=None):
+    def replace_in_run(self, i, old, new, nth=None, tracked=True):
         body = self.d.fn_match(i).group(2)
         ms = [m for m in RUN.finditer(body) if old in run_text(m.group(0))]
         if nth:
@@ -149,10 +213,11 @@ class Editor:
 
         def mk(s):
             return '%s%s<w:t xml:space="preserve">%s</w:t></w:r>' % (ropen, rpr, escape(s))
-        out = (mk(a) if a else '') + self.del_run(mk(old)) + self.ins_run(new, rpr) + (mk(b) if b else '')
+        gone = self.del_run(mk(old)) if tracked else ''
+        out = (mk(a) if a else '') + gone + self.new_runs(new, rpr, tracked) + (mk(b) if b else '')
         self.d.set_fn(i, body[:m.start()] + out + body[m.end():])
 
-    def replace_runs(self, i, first, last, new):
+    def replace_runs(self, i, first, last, new, tracked=True):
         body = self.d.fn_match(i).group(2)
         runs = list(RUN.finditer(body))
         idx = [k for k, m in enumerate(runs) if first in run_text(m.group(0)) or last in run_text(m.group(0))]
@@ -160,9 +225,9 @@ class Editor:
             raise SystemExit('footnote %d: markers not found' % i)
         s, e = idx[0], idx[-1]
         seg = body[runs[s].start():runs[e].end()]
-        out = ''.join(self.del_run(m.group(0)) for m in RUN.finditer(seg))
+        out = ''.join(self.del_run(m.group(0)) for m in RUN.finditer(seg)) if tracked else ''
         rpr = re.search(r'<w:rPr>.*?</w:rPr>', runs[s].group(0), re.S)
-        out += self.ins_run(new, rpr.group(0) if rpr else None)
+        out += self.new_runs(new, rpr.group(0) if rpr else None, tracked)
         self.d.set_fn(i, body[:runs[s].start()] + out + body[runs[e].end():])
 
     # ---------- comments (anchored on the footnote reference in the body)
@@ -275,16 +340,65 @@ def cmd_dump(args):
 def cmd_apply(args):
     d = Doc(args.docx)
     spec = json.load(open(args.fills, encoding='utf8'))
+    both = set(spec.get('fill') or {}) & set(spec.get('fill_untracked') or {})
+    if both:
+        raise SystemExit('footnote(s) %s appear in both "fill" and "fill_untracked" – choose one' % ', '.join(sorted(both)))
     e = Editor(d, args.author)
+    for k, v in (spec.get('fill_untracked') or {}).items():
+        e.fill_empty(int(k), v, tracked=False)
     for k, v in (spec.get('fill') or {}).items():
         e.fill_empty(int(k), v)
     for it in spec.get('replace') or []:
-        e.replace_in_run(int(it['id']), it['old'], it['new'], it.get('nth'))
+        e.replace_in_run(int(it['id']), it['old'], it['new'], it.get('nth'), it.get('tracked', True))
     for it in spec.get('replace_runs') or []:
-        e.replace_runs(int(it['id']), it['first'], it['last'], it['new'])
+        e.replace_runs(int(it['id']), it['first'], it['last'], it['new'], it.get('tracked', True))
     e.add_comments(spec.get('comments') or [])
     d.save(args.out)
-    print('written', args.out)
+    n_plain = len(spec.get('fill_untracked') or {}) + sum(1 for it in (spec.get('replace') or []) + (spec.get('replace_runs') or [])
+                                                           if it.get('tracked', True) is False)
+    print('written %s (%d without tracked changes)' % (args.out, n_plain))
+
+
+def expected_after_reject(before, spec):
+    """What each footnote should read after Reject All: the original, plus whatever was put in
+    on purpose without tracking (fill_untracked, replace with "tracked": false)."""
+    exp = dict(before)
+    for k, v in (spec.get('fill_untracked') or {}).items():
+        exp[str(k)] = exp.get(str(k), '') + unmark(v)
+    for it in spec.get('replace') or []:
+        if it.get('tracked', True) is False:
+            k, t = str(it['id']), exp.get(str(it['id']), '')
+            n, pos = it.get('nth') or 1, -1
+            for _ in range(n):
+                pos = t.find(it['old'], pos + 1)
+            if pos >= 0:
+                exp[k] = t[:pos] + unmark(it['new']) + t[pos + len(it['old']):]
+    for it in spec.get('replace_runs') or []:
+        if it.get('tracked', True) is False:
+            # whole runs from `first` to `last` were swapped: the text is known only up to run
+            # boundaries, so accept the note as it now reads if it holds the new text
+            # and kept what came before `first` and after `last`.
+            k, t = str(it['id']), exp.get(str(it['id']), '')
+            a, b = t.find(it['first']), t.rfind(it['last'])
+            if a >= 0 and b >= 0:
+                exp[k] = ('runs', t[:a], unmark(it['new']), t[b + len(it['last']):])
+    return exp
+
+
+def matches(expected, actual):
+    if isinstance(expected, tuple):          # untracked replace_runs, see above
+        _, head, new, tail = expected
+        actual = actual or ''
+        k = actual.find(new)
+        # the deleted runs may have held text before `first` / after `last`
+        return k >= 0 and head.startswith(actual[:k]) and tail.endswith(actual[k + len(new):])
+    return expected == actual
+
+
+def quoted_spans(text):
+    """Quotations inside a note («"..."»), skipping the gershayim of abbreviations (ח"ב, ע"פ)."""
+    t = re.sub(r'(?<=[א-ת])["״](?=[א-ת])', '\x00', unmark(text))
+    return [s.replace('\x00', '"') for s in re.findall(r'["“”״]([^"“”״]+)["“”״]', t)]
 
 
 
@@ -307,15 +421,19 @@ def cmd_verify(args):
         doc = z.read('word/document.xml').decode('utf8')
         comments = z.read('word/comments.xml').decode('utf8') if 'word/comments.xml' in names else ''
     print('OK    מבנה הקובץ ו-XML תקינים' if ok else 'שגיאות מבנה למעלה')
+    spec = json.load(open(args.fills, encoding='utf8')) if args.fills else {}
+    edits = (spec.get('replace') or []) + (spec.get('replace_runs') or [])
+    want_tracked = len(spec.get('fill') or {}) + sum(1 for it in edits if it.get('tracked', True) is not False)
+    want_plain = len(spec.get('fill_untracked') or {}) + sum(1 for it in edits if it.get('tracked', True) is False)
 
     ins = re.findall(r'<w:ins\b[^>]*w:author="([^"]*)"', fn + doc)
     dele = re.findall(r'<w:del\b[^>]*w:author="([^"]*)"', fn + doc)
-    print('OK    הוספות במעקב שינויים: %d, מחיקות: %d (מחברים: %s)'
-          % (len(ins), len(dele), ', '.join(sorted(set(ins + dele))) or '-'))
-    if not ins:
+    print('OK    הוספות במעקב שינויים: %d, מחיקות: %d (מחברים: %s)%s'
+          % (len(ins), len(dele), ', '.join(sorted(set(ins + dele))) or '-',
+             '; בלי מעקב (מקורות ודאיים): %d' % want_plain if args.fills else ''))
+    if (want_tracked if args.fills else True) and not ins:
         print('FAIL  אין אף הוספה במעקב שינויים'); ok = False
 
-    untracked = re.findall(r'</w:ins>\s*(?:<w:proofErr[^>]*/>\s*)*<w:r\b(?:(?!</w:r>).)*?<w:t[^>]*>[^<]', fn, re.S)
     total_fn = len(re.findall(r'<w:footnote\b[^>]*w:id="(?!(?:-1|0)")', fn))
     print('OK    הערות שוליים בקובץ: %d' % total_fn)
 
@@ -335,27 +453,56 @@ def cmd_verify(args):
         FN = r'<w:footnote\b[^>]*w:id="(-?\d+)"[^>]*>(.*?)</w:footnote>'
         before = {m.group(1): original_text(m.group(2)) for m in re.finditer(FN, ofn, re.S)}
         after = {m.group(1): original_text(m.group(2)) for m in re.finditer(FN, fn, re.S)}
-        moved = sorted((k for k in before if before[k] != after.get(k)), key=int)
+        expect = expected_after_reject(before, spec)
+        moved = sorted((k for k in before if not matches(expect[k], after.get(k))), key=int)
         if moved:
-            print('FAIL  הערות שהנוסח המקורי שלהן השתנה מחוץ למעקב השינויים: %s' % ', '.join(moved)); ok = False
+            print('FAIL  הערות שהשתנו מחוץ למעקב השינויים בלי שהוגדרו כך ב-fills (fill_untracked / "tracked": false): %s%s'
+                  % (', '.join(moved), '' if args.fills else ' – להריץ עם --fills')); ok = False
         else:
-            print('OK    דחיית כל השינויים מחזירה כל הערה לנוסח המקורי')
+            print('OK    דחיית כל השינויים מחזירה כל הערה לנוסח המקורי%s'
+                  % (' (חוץ מ-%d מילויים ודאיים שהוכנסו בלי מעקב)' % want_plain if want_plain else ''))
 
     if args.fills:
-        spec = json.load(open(args.fills, encoding='utf8'))
         plain = html.unescape(''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', fn)))
         missing = []
-        for k, v in (spec.get('fill') or {}).items():
-            probe = v[:40]
-            if probe not in plain:
-                missing.append('fill %s' % k)
-        for it in (spec.get('replace') or []) + (spec.get('replace_runs') or []):
-            if it['new'][:40] not in plain:
-                missing.append('replace %s' % it['id'])
+        texts = [('fill %s' % k, v) for k, v in (spec.get('fill_untracked') or {}).items()]
+        texts += [('fill %s' % k, v) for k, v in (spec.get('fill') or {}).items()]
+        texts += [('replace %s' % it['id'], it['new']) for it in edits]
+        for name, v in texts:
+            if unmark(v)[:40] not in plain:
+                missing.append(name)
         if missing:
             print('FAIL  טקסט שלא נמצא בקובץ הפלט: %s' % ', '.join(missing)); ok = False
         else:
             print('OK    כל המילויים מופיעים בקובץ')
+
+        # the Rav's books in blue
+        blue_runs = [run_text(m.group(0)) for m in RUN.finditer(fn) if 'w:val="%s"' % BLUE in m.group(0)]
+        marked = [s for _, v in texts for s, b in segments(v) if b]
+        not_blue = [s for s in marked if not any(s in r for r in blue_runs)]
+        if not_blue:
+            print('FAIL  שם ספר שסומן {{ }} ולא נצבע בכחול: %s' % '; '.join(not_blue)); ok = False
+        elif marked:
+            print('OK    שמות ספרי הרב בכחול: %d' % len(marked))
+        titles = book_titles()
+        loose = []
+        for name, v in texts:
+            rest = norm_q(''.join(s for s, b in segments(v) if not b))
+            for t in titles:
+                if norm_q(t) in rest:
+                    loose.append('%s – "%s"' % (name, t))
+        if loose:
+            print('WARN  שם ספר של הרב בלי {{ }} (צריך להיות בכחול): %s' % '; '.join(loose))
+
+        # a verse quoted inside a note: 4+ words → with nikud
+        bare = []
+        for name, v in texts:
+            for q in quoted_spans(v):
+                words = re.findall(r'[א-ת][א-ת֑-ׇ\'"]*', q)
+                if len(words) >= 4 and not re.search(r'[ְ-ּׁׂ]', q):
+                    bare.append('%s – "%s"' % (name, q[:40]))
+        if bare:
+            print('WARN  ציטוט של 4 מלים ומעלה בלי ניקוד – אם זה פסוק, לנקד (sefaria.py verse): %s' % '; '.join(bare))
         want = [int(c['id']) for c in (spec.get('comments') or [])]
         got = len(re.findall(r'<w:comment\b[^>]*w:id="\d+"', comments))
         anchors = len(re.findall(r'<w:commentReference w:id="\d+"/>', doc))

@@ -17,6 +17,11 @@ Three questions, three commands (standard library only):
         is read from Hebrew Wikisource, which has one page per amud. A miss looks at
         the two adjacent amudim as well, because Wikisource does not always break the
         page where the printed edition does.
+  sefaria.py verse "קהלת א ב" [--words "הבל הבלים אמר קהלת"]
+        the verse with nikud, as a verse quoted inside a footnote must be written
+        (4 words or more): no te'amim, meteg or sof pasuq, maqaf as a space, the qere
+        (not the ketiv), and the Name as הוי'. --words prints only that part of the
+        verse (matched by its letters; ו/י and nikud in the request do not matter).
   sefaria.py ping
 
 Sefaria answers scripted requests only when they carry a browser User-Agent
@@ -111,6 +116,53 @@ def cmd_text(o):
             print("  …" + text[a:b].replace("\n", " ") + "…")
     else:
         print(text[:o.max_chars])
+
+
+NAME = re.compile(r"(?<![א-תְ-ּׁׂ])((?:[ובלכמשה][ְ-ּׁׂ]*)?)י[ְ-ּׁׂ]*ה[ְ-ּׁׂ]*ו[ְ-ּׁׂ]*ה[ְ-ּׁׂ]*(?![א-ת])")
+
+
+def vocalized(raw):
+    """Masorah text → the way a verse is quoted with nikud in Gal Einai texts."""
+    t = re.sub(r'<span class="mam-kq-k">.*?</span>', "", raw)        # ketiv out, qere stays
+    t = html.unescape(TAGS.sub("", t))
+    t = re.sub(r"\{[פס]\}", "", t).replace("[", "").replace("]", "")
+    t = re.sub(r"[֑-ֽ֯׀׃ׅׄ׆]", "", t)          # te'amim, meteg, paseq, sof pasuq, dots
+    t = t.replace("־", " ").replace("ׇ", "ָ")     # maqaf → space, qamats qatan → qamats
+    t = NAME.sub(lambda m: m.group(1) + "הוי'", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def skeleton(word):
+    """Letters only, without ו/י (full and defective spelling compare equal); the Name in any
+    of its written forms (הוי' ה' ד' יהוה, with a prefix letter) compares equal too."""
+    w = re.sub(r"[״\"׳’]", "'", plain(word))
+    m = re.fullmatch(r"([ובלכמשה]?)(?:הוי'|ה'|ד'|יהוה|הויה)", re.sub(r"[^א-ת']", "", w))
+    if m:
+        return re.sub(r"[וי]", "", m.group(1)) + "הה"
+    return re.sub(r"[^א-ת]|[וי]", "", w)
+
+
+def cmd_verse(o):
+    d = call("/api/v3/texts/" + urllib.parse.quote(o.ref) + "?version=hebrew")
+    if d.get("error"):
+        sys.exit(f"sefaria: {d['error']}")
+    versions = d.get("versions") or []
+    if not versions:
+        sys.exit(f"sefaria: no Hebrew text for {o.ref}")
+    raw = versions[0].get("text")
+    text = vocalized(" ".join(flatten(raw).split("\n")))
+    if not o.words:
+        print(f"{d.get('heRef', o.ref)} | {text}")
+        return
+    words = text.split()
+    want = [s for s in (skeleton(w) for w in re.split(r"[\s־]+", o.words)) if s]
+    have = [skeleton(w) for w in words]
+    for k in range(len(words) - len(want) + 1):
+        if have[k:k + len(want)] == want:
+            print(f"{d.get('heRef', o.ref)} | {' '.join(words[k:k + len(want)])}")
+            return
+    print(f"«{o.words}» לא נמצא כרצף ב-{d.get('heRef', o.ref)}:\n  {text}")
+    sys.exit(1)
 
 
 def zohar_title(ref):
@@ -211,6 +263,9 @@ def main():
     z.add_argument("ref")
     z.add_argument("--grep")
     z.add_argument("--max-chars", type=int, default=3000)
+    v = sub.add_parser("verse")
+    v.add_argument("ref")
+    v.add_argument("--words")
     sub.add_parser("ping")
     o = p.parse_args()
     if o.cmd == "ping":
@@ -220,6 +275,8 @@ def main():
         cmd_search(o)
     elif o.cmd == "zohar":
         cmd_zohar(o)
+    elif o.cmd == "verse":
+        cmd_verse(o)
     else:
         cmd_text(o)
 
